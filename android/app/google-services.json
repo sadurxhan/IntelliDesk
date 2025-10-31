@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "953866172661",
+    "firebase_url": "https://intellideskisannoying-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "intellideskisannoying",
+    "storage_bucket": "intellideskisannoying.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:953866172661:android:f7d4407cdcd46d2de8adbc",
+        "android_client_info": {
+          "package_name": "com.example.intellidesk_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA97t8zp6_9NUEE1_ZG48-0ci7WxvOfkRQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

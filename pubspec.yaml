@@ -1,0 +1,40 @@
+name: intellidesk_app
+description: Study & tracking dashboard
+publish_to: "none"
+version: 0.2.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  logging: ^1.2.0
+
+  # State/UI
+  flutter_riverpod: ^2.5.1
+  intl: ^0.20.2
+  smooth_page_indicator: ^1.2.0
+
+  # Network + permissions
+  connectivity_plus: ^7.0.0
+  network_info_plus: ^7.0.0   
+  permission_handler: ^12.0.1
+  shared_preferences: ^2.2.3
+
+  # Firebase / notifications
+  firebase_core: ^4.1.1
+  firebase_auth: ^6.1.0
+  firebase_database: ^12.0.2
+  firebase_messaging: ^16.0.2
+  flutter_local_notifications: ^19.4.2
+  cloud_firestore: ^6.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
