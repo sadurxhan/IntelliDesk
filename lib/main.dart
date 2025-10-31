@@ -38,6 +38,12 @@ const String kDatabaseUrl =
 final Int64List kVibrate10s = Int64List.fromList(<int>[0, 10000]);
 const String kNotificationSound = 'alert';
 
+// --- CUSTOM THEME COLORS (from your new design) ---
+const Color kPrimaryBlue = Color(0xFF4A90E2);
+const Color kBackgroundLight = Color(0xFFF7F9FC);
+const Color kTextPrimaryLight = Color(0xFF1E293B);
+const Color kBorderLight = Color(0xFFCBD5E1);
+
 /// ─────────────────────────────────────────────────────────────────────────────
 /// MODELS
 /// ─────────────────────────────────────────────────────────────────────────────
@@ -316,92 +322,198 @@ Future<void> main() async {
     );
   };
 
-  // Perform initialization and store the result
-  late bool initializationSuccess;
-  try {
-    if (kUseFirebase || kUseFcm) {
-      await Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      );
-    }
-    if (kUseFcm) {
-      await Notifier.init();
-      FirebaseMessaging.onBackgroundMessage(
-        _firebaseMessagingBackgroundHandler,
-      );
-      final fbm = FirebaseMessaging.instance;
-      await fbm.requestPermission();
-      await fbm.setForegroundNotificationPresentationOptions(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
-      FirebaseMessaging.onMessage.listen((msg) async {
-        final title = msg.notification?.title ?? 'Intellidesk';
-        final body = msg.notification?.body ?? 'Update received';
-        await Notifier.show(title: title, body: body);
-      });
-    }
-    initializationSuccess = true;
-  } catch (error) {
-    debugPrint('Error during initialization: $error');
-    initializationSuccess = false;
-  }
-
+  // **FIX 1 (Your Step 3): Run the app immediately with a wrapper**
   runApp(
     ProviderScope(
-      child: LoadingApp(initializationSuccess: initializationSuccess),
+      child: const InitWrapper(),
     ),
   );
 }
 
+class InitWrapper extends StatelessWidget {
+  const InitWrapper({super.key});
+
+  /// This method contains all the async init logic from the original main()
+  Future<bool> _initialize() async {
+    try {
+      return await Future.any<bool>([
+        Future.delayed(
+            const Duration(seconds: 15), () => false), // Timeout after 15s
+        () async {
+          if (kUseFirebase || kUseFcm) {
+            await Firebase.initializeApp(
+              options: DefaultFirebaseOptions.currentPlatform,
+            );
+          }
+          if (kUseFcm) {
+            await Notifier.init();
+            FirebaseMessaging.onBackgroundMessage(
+                _firebaseMessagingBackgroundHandler);
+            final fbm = FirebaseMessaging.instance;
+
+            // --- THIS IS THE CHANGE ---
+            // The fbm.requestPermission() call is GONE from here.
+            // MyApp will handle it after the UI is visible.
+            // ---
+
+            await fbm.setForegroundNotificationPresentationOptions(
+              alert: true,
+              badge: true,
+              sound: true,
+            );
+            FirebaseMessaging.onMessage.listen((msg) async {
+              final title = msg.notification?.title ?? 'Intellidesk';
+              final body = msg.notification?.body ?? 'Update received';
+              await Notifier.show(title: title, body: body);
+            });
+          }
+          return true;
+        }(),
+      ]);
+    } catch (error) {
+      debugPrint('Error during initialization: $error');
+      return false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // ... (The rest of the build method is unchanged)
+    return FutureBuilder<bool>(
+      future: _initialize(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          // Show a simple loading app while initializing
+          return const MaterialApp(
+            debugShowCheckedModeBanner: false,
+            home: Scaffold(
+              backgroundColor: kBackgroundLight, // Match theme
+              body: Center(child: CircularProgressIndicator()),
+            ),
+          );
+        }
+
+        // Initialization is done, load the main app
+        // We pass the success/fail state to LoadingApp
+        return LoadingApp(initializationSuccess: snapshot.data ?? false);
+      },
+    );
+  }
+}
+
+/// **FIX 2 (Your Step 2): This is now the SINGLE root MaterialApp**
 class LoadingApp extends StatelessWidget {
   final bool initializationSuccess;
   const LoadingApp({super.key, required this.initializationSuccess});
 
   @override
   Widget build(BuildContext context) {
+    // Decide which home widget to show
     final Widget homeWidget =
         initializationSuccess ? const MyApp() : const FallbackApp();
 
+    // This is now the one and only MaterialApp
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      title: 'Intellidesk', // Added title
       theme: ThemeData(
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
+        fontFamily: 'Lexend',
+        scaffoldBackgroundColor: kBackgroundLight,
+        primaryColor: kPrimaryBlue,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00C4FF),
-          brightness: Brightness.dark,
+          seedColor: kPrimaryBlue,
+          brightness: Brightness.light,
+          primary: kPrimaryBlue,
+          surface: kBackgroundLight,
+          onPrimary: Colors.white,
         ),
-        scaffoldBackgroundColor: Colors.transparent,
         useMaterial3: true,
-      ),
-      home: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF0B1E2D), Color(0xFF0E2740)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: kBackgroundLight,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          surfaceTintColor: Colors.transparent,
+          titleTextStyle: TextStyle(
+            fontFamily: 'Lexend',
+            color: Colors.black,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+          iconTheme: IconThemeData(color: Colors.black),
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: const BorderRadius.all(Radius.circular(16)),
+            side: BorderSide(color: Colors.grey.shade200, width: 1),
           ),
         ),
-        child: homeWidget,
+        inputDecorationTheme: InputDecorationTheme(
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8.0),
+            borderSide: const BorderSide(color: kBorderLight),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8.0),
+            borderSide: const BorderSide(color: kBorderLight),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8.0),
+            borderSide: const BorderSide(color: kPrimaryBlue, width: 2),
+          ),
+          labelStyle: const TextStyle(color: kTextPrimaryLight),
+          hintStyle: TextStyle(color: Colors.grey.shade400),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: kPrimaryBlue,
+            foregroundColor: Colors.white,
+            minimumSize: const Size(double.infinity, 48),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8.0),
+            ),
+            textStyle: const TextStyle(
+              fontFamily: 'Lexend',
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+        ),
+        segmentedButtonTheme: SegmentedButtonThemeData(
+          style: SegmentedButton.styleFrom(
+            selectedBackgroundColor: Colors.white,
+            selectedForegroundColor: kPrimaryBlue,
+            backgroundColor: Colors.grey.shade200,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12.0),
+            ),
+          ),
+        ),
+        bottomNavigationBarTheme: const BottomNavigationBarThemeData(
+          backgroundColor: Colors.white,
+          selectedItemColor: kPrimaryBlue,
+          unselectedItemColor: Colors.grey,
+        ),
       ),
+      home: homeWidget, // Set the home widget (MyApp or FallbackApp)
     );
   }
 }
 
+/// **FIX 3 (Your Step 2): This is no longer a MaterialApp**
 class FallbackApp extends StatelessWidget {
   const FallbackApp({super.key});
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: const Scaffold(
-        body: Center(
-          child: Text(
-            'Failed to initialize Firebase.\nCheck console for details.',
-            style: TextStyle(color: Colors.redAccent, fontSize: 20),
-            textAlign: TextAlign.center,
-          ),
+    // It's just a Scaffold. The theme comes from LoadingApp.
+    return const Scaffold(
+      body: Center(
+        child: Text(
+          'Failed to initialize Firebase.\nCheck console for details.',
+          style: TextStyle(color: Colors.redAccent, fontSize: 20),
+          textAlign: TextAlign.center,
         ),
       ),
     );
@@ -870,12 +982,6 @@ final timerProvider = StateNotifierProvider<TimerController, TimerState>(
 /// APP ROOT (NEW LIGHT THEME)
 /// ─────────────────────────────────────────────────────────────────────────────
 
-// Define custom colors from the design
-const Color kPrimaryBlue = Color(0xFF4A90E2);
-const Color kBackgroundLight = Color(0xFFF7F9FC);
-const Color kTextPrimaryLight = Color(0xFF1E293B);
-const Color kBorderLight = Color(0xFFCBD5E1);
-
 class MyApp extends ConsumerWidget {
   const MyApp({super.key});
 
@@ -883,99 +989,27 @@ class MyApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(authProvider);
 
-    // New Light Theme based on HTML designs
-    final theme = ThemeData(
-      brightness: Brightness.light,
-      fontFamily: 'Lexend',
-      scaffoldBackgroundColor: kBackgroundLight,
-      primaryColor: kPrimaryBlue,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: kPrimaryBlue,
-        brightness: Brightness.light,
-        primary: kPrimaryBlue,
-        surface: kBackgroundLight,
-        onPrimary: Colors.white,
-      ),
-      useMaterial3: true,
-      appBarTheme: const AppBarTheme(
-        backgroundColor: kBackgroundLight,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        surfaceTintColor: Colors.transparent,
-        titleTextStyle: TextStyle(
-          fontFamily: 'Lexend',
-          color: Colors.black,
-          fontSize: 20,
-          fontWeight: FontWeight.bold,
-        ),
-        iconTheme: IconThemeData(color: Colors.black),
-      ),
-      cardTheme: const CardThemeData(
-        elevation: 0,
-        color: Colors.white,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(16)), // xl
-          side: BorderSide(color: Color(0xFFEEEEEE), width: 1),
-        ),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8.0), // lg
-          borderSide: const BorderSide(color: kBorderLight),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8.0),
-          borderSide: const BorderSide(color: kBorderLight),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8.0),
-          borderSide: const BorderSide(color: kPrimaryBlue, width: 2),
-        ),
-        labelStyle: const TextStyle(color: kTextPrimaryLight),
-        hintStyle: TextStyle(color: Colors.grey.shade400),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          backgroundColor: kPrimaryBlue,
-          foregroundColor: Colors.white,
-          minimumSize: const Size(double.infinity, 48), // h-12
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8.0), // lg
-          ),
-          textStyle: const TextStyle(
-            fontFamily: 'Lexend',
-            fontWeight: FontWeight.bold,
-            fontSize: 16,
-          ),
-        ),
-      ),
-      segmentedButtonTheme: SegmentedButtonThemeData(
-        style: SegmentedButton.styleFrom(
-          selectedBackgroundColor: Colors.white,
-          selectedForegroundColor: kPrimaryBlue,
-          backgroundColor: Colors.grey.shade200,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12.0), // xl
-          ),
-        ),
-      ),
-      bottomNavigationBarTheme: const BottomNavigationBarThemeData(
-        backgroundColor: Colors.white,
-        selectedItemColor: kPrimaryBlue,
-        unselectedItemColor: Colors.grey,
-      ),
-    );
+    // This is your excellent fix for web
+    if (kIsWeb && kUseFcm) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final fbm = FirebaseMessaging.instance;
+        final settings = await fbm.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+        debugPrint(
+            'Post-frame permission status: ${settings.authorizationStatus}');
+      });
+    }
 
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Intellidesk',
-      theme: theme,
-      home: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 400),
-        child: user == null
-            ? const LoginScreen() // Start at Login screen
-            : const _AppShell(),
-      ),
+    // The theme is now in LoadingApp.
+    // This widget just decides between Login and AppShell.
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 400),
+      child: user == null
+          ? const LoginScreen() // Start at Login screen
+          : const _AppShell(),
     );
   }
 }
