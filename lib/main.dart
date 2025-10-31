@@ -25,6 +25,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 const bool kUseFirebase = true;
 const bool kUseFcm = true;
 
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
 /// Your RTDB URL (same as ESP32 firmware)
 const String kDatabaseUrl =
     'https://intellideskisannoying-default-rtdb.asia-southeast1.firebasedatabase.app';
@@ -43,8 +45,13 @@ const Color kBorderLight = Color(0xFFCBD5E1);
 class AppUser {
   final String uid;
   final String email;
-  String get displayName => email.split('@')[0];
-  AppUser({required this.uid, required this.email});
+  final String displayName; // <-- THIS IS THE FIX
+
+  AppUser({
+    required this.uid,
+    required this.email,
+    required this.displayName,
+  });
 }
 
 class Task {
@@ -52,49 +59,90 @@ class Task {
   final String title;
   final DateTime? due;
   final bool done;
+  final DateTime? createdAt; // ✅ FIXED: Added for sorting
+
   const Task({
     required this.id,
     required this.title,
     this.due,
     this.done = false,
+    this.createdAt, // ✅ FIXED: Added to constructor
   });
+
+  /// ✅ NEW: Creates a Task from Firestore data
+  factory Task.fromFirestore(DocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    return Task(
+      id: doc.id,
+      title: data['title'] ?? 'Untitled Task',
+      done: data['done'] == true,
+      due: (data['due'] as Timestamp?)?.toDate(),
+      createdAt: (data['createdAt'] as Timestamp?)
+          ?.toDate(), // ✅ FIXED: Parse createdAt
+    );
+  }
+
   Task copyWith({String? title, DateTime? due, bool? done}) => Task(
         id: id,
         title: title ?? this.title,
         due: due ?? this.due,
         done: done ?? this.done,
+        createdAt: createdAt,
       );
 }
 
 /// Model for an item the user has registered
 class UserItem {
-  final String macAddress; // This will be the document ID
+  final String macAddress;
   final String name;
-  const UserItem({required this.macAddress, required this.name});
-}
+  final bool atHome;
 
-/// Combined model for display
-class TrackableItem {
-  final String id; // MAC Address
-  final String name;
-  final bool atHome; // Live status
-  const TrackableItem({
-    required this.id,
+  const UserItem({
+    required this.macAddress,
     required this.name,
     required this.atHome,
   });
+
+  factory UserItem.fromRTDB(String id, Map<String, dynamic> map) {
+    return UserItem(
+      macAddress: (map['bleAddress'] ?? id).toString().toUpperCase(),
+      name: (map['name'] ?? 'Unknown').toString(),
+      atHome: map['atHome'] == true,
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'bleAddress': macAddress,
+        'name': name,
+        'atHome': atHome,
+      };
 }
 
 class SensorData {
   final double? temperature;
   final double? humidity;
   final double? lightLux;
-  const SensorData({this.temperature, this.humidity, this.lightLux});
-  factory SensorData.fromMap(Map data) => SensorData(
-        temperature: (data['temperature'] as num?)?.toDouble(),
-        humidity: (data['humidity'] as num?)?.toDouble(),
-        lightLux: (data['light_lux'] as num?)?.toDouble(),
-      );
+
+  const SensorData({
+    this.temperature,
+    this.humidity,
+    this.lightLux,
+  });
+
+  factory SensorData.fromRTDB(Map<dynamic, dynamic>? data) {
+    if (data == null) return const SensorData();
+    return SensorData(
+      temperature: (data['temperature'] as num?)?.toDouble(),
+      humidity: (data['humidity'] as num?)?.toDouble(),
+      lightLux: (data['light_lux'] as num?)?.toDouble(),
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'temperature': temperature,
+        'humidity': humidity,
+        'light_lux': lightLux,
+      };
 }
 
 /// ─────────────────────────────────────────────────────────────────────────────
@@ -130,7 +178,7 @@ final phoneWifiProvider = StreamProvider<HomeWifi?>((ref) async* {
   } catch (_) {}
   final connectivity = Connectivity();
   final info = NetworkInfo();
-  yield* Stream.periodic(const Duration(seconds: 3), (_) async {
+  yield* Stream.periodic(const Duration(seconds: 30), (_) async {
     try {
       final results = await connectivity.checkConnectivity();
       if (!results.contains(ConnectivityResult.wifi)) return null;
@@ -391,6 +439,7 @@ class LoadingApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Intellidesk', // Added title
+      navigatorKey: navigatorKey,
       theme: ThemeData(
         brightness: Brightness.light,
         fontFamily: 'Lexend',
@@ -530,12 +579,24 @@ String authErrorMessage(FirebaseAuthException e) {
   }
 }
 
+/// ─────────────────────────────────────────────────────────────────────────────
+/// AUTH PROVIDER
+/// ────────────────────────────────────────────────────────────────────────────
 class AuthController extends StateNotifier<AppUser?> {
   AuthController() : super(null) {
     FirebaseAuth.instance.authStateChanges().listen((u) {
-      state = u == null ? null : AppUser(uid: u.uid, email: u.email ?? '');
+      if (u == null) {
+        state = null;
+      } else {
+        state = AppUser(
+          uid: u.uid,
+          email: u.email ?? '',
+          displayName: u.displayName ?? u.email?.split('@')[0] ?? 'User',
+        );
+      }
     });
   }
+
   Future<void> signIn(String email, String password) async {
     await FirebaseAuth.instance.signInWithEmailAndPassword(
       email: email,
@@ -544,10 +605,24 @@ class AuthController extends StateNotifier<AppUser?> {
   }
 
   Future<void> signUp(String email, String password) async {
-    await FirebaseAuth.instance.createUserWithEmailAndPassword(
+    UserCredential userCredential =
+        await FirebaseAuth.instance.createUserWithEmailAndPassword(
       email: email,
       password: password,
     );
+
+    if (userCredential.user != null) {
+      try {
+        String newDisplayName = email.split('@')[0]; // Default name from email
+        await userCredential.user!.updateDisplayName(newDisplayName);
+
+        // Ensure the AuthStateChanges stream picks up the updated user immediately
+        await userCredential.user!.reload();
+      } catch (e) {
+        // Log error but don't prevent signup from completing
+        debugPrint('Error setting display name for new user: $e');
+      }
+    }
   }
 
   Future<void> signOut() async {
@@ -560,11 +635,11 @@ final authProvider = StateNotifierProvider<AuthController, AppUser?>(
 );
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// SENSOR PROVIDER
+/// SENSOR PROVIDER Sensor data stream (RTDB)
 /// ─────────────────────────────────────────────────────────────────────────────
-/// Sensor data stream (RTDB)
 final sensorStreamProvider = StreamProvider<SensorData?>((ref) {
   if (!kUseFirebase) {
+    // ✅ Mock data for local testing
     return Stream.periodic(const Duration(seconds: 2), (i) {
       final s = DateTime.now().second;
       return SensorData(
@@ -574,53 +649,118 @@ final sensorStreamProvider = StreamProvider<SensorData?>((ref) {
       );
     });
   }
+
   final refDb = _db.ref('/sensor_data');
-  return refDb.onValue.map((e) {
-    final val = e.snapshot.value;
-    if (val is Map) return SensorData.fromMap(val);
+  return refDb.onValue.map((event) {
+    final val = event.snapshot.value;
+
+    if (val is Map) return SensorData.fromRTDB(val as Map<dynamic, dynamic>?);
     return null;
   });
 });
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// ITEMS (BLE) PROVIDERS
+/// UserItemsNotifier (Add / Remove / Real-Time Sync for ESP)
 /// ─────────────────────────────────────────────────────────────────────────────
-/// Provider for the user's registered items (from Firestore)
 class UserItemsNotifier extends StateNotifier<List<UserItem>> {
   final String userId;
-  late final CollectionReference<Map<String, dynamic>> _itemsRef;
-  StreamSubscription? _sub;
-  UserItemsNotifier(this.userId) : super([]) {
+  late final DatabaseReference _itemsRef;
+  StreamSubscription<DatabaseEvent>? _sub;
+
+  UserItemsNotifier(this.userId) : super(const []) {
     if (userId.isEmpty) return;
-    _itemsRef = _fs.collection('users').doc(userId).collection('items');
+    _itemsRef = _db.ref('users/$userId/items');
     _listen();
   }
+
+  /// 🔄 Listen to changes in RTDB in real-time
   void _listen() {
     _sub?.cancel();
-    _sub = _itemsRef.snapshots().listen((snapshot) {
-      state = snapshot.docs
-          .map(
-            (doc) => UserItem(
-              macAddress: doc.id,
-              name: doc.data()['name'] as String? ?? 'Unknown',
-            ),
-          )
-          .toList();
+    _sub = _itemsRef.onValue.listen((event) {
+      final data = event.snapshot.value;
+      if (data == null || data is! Map) {
+        state = [];
+        return;
+      }
+
+      final items = data.entries.map((entry) {
+        final value = Map<String, dynamic>.from(entry.value);
+        return UserItem(
+          macAddress: value['bleAddress'] ?? entry.key,
+          name: value['name'] ?? 'Unknown',
+          atHome: value['atHome'] ?? false,
+        );
+      }).toList();
+
+      state = items;
+      debugPrint('✅ Synced ${items.length} items from RTDB.');
+    }, onError: (e) {
+      debugPrint('❌ RTDB stream error: $e');
     });
   }
 
-  Future<void> add(String name, String mac) async {
-    if (userId.isEmpty) return;
-    final macUpper = mac.toUpperCase();
-    await _itemsRef.doc(macUpper).set({
-      'name': name,
-      'macAddress': macUpper, // Store for convenience
-    });
+  /// ➕ Add new item (app adds, ESP later updates atHome)
+  Future<void> add(String name, String bleAddress) async {
+    if (userId.isEmpty) {
+      debugPrint('⚠️ Cannot add item — userId empty');
+      return;
+    }
+
+    final macUpper = bleAddress.trim().toUpperCase();
+    if (macUpper.isEmpty || name.trim().isEmpty) return;
+
+    try {
+      await _itemsRef.child(macUpper).set({
+        'name': name.trim(),
+        'bleAddress': macUpper,
+        'atHome': false,
+      });
+      debugPrint('✅ Item added to RTDB: $name ($macUpper)');
+    } catch (e, st) {
+      debugPrint('❌ Failed to add item: $e');
+      debugPrintStack(stackTrace: st);
+    }
   }
 
-  Future<void> remove(String mac) async {
+  /// 🗑️ Remove item (both app + ESP will stop seeing it)
+  Future<void> remove(String macAddress) async {
     if (userId.isEmpty) return;
-    await _itemsRef.doc(mac.toUpperCase()).delete();
+    final macUpper = macAddress.trim().toUpperCase();
+    if (macUpper.isEmpty) return;
+
+    try {
+      await _itemsRef.child(macUpper).remove();
+      debugPrint('🗑️ Item removed: $macUpper');
+    } catch (e, st) {
+      debugPrint('❌ Failed to remove item: $e');
+      debugPrintStack(stackTrace: st);
+    }
+  }
+
+  /// 🔁 Manual refresh (not needed often, but available)
+  Future<void> refresh() async {
+    try {
+      final snapshot = await _itemsRef.get();
+      final data = snapshot.value;
+      if (data == null || data is! Map) {
+        state = [];
+        return;
+      }
+
+      final items = data.entries.map((entry) {
+        final value = Map<String, dynamic>.from(entry.value);
+        return UserItem(
+          macAddress: value['bleAddress'] ?? entry.key,
+          name: value['name'] ?? 'Unknown',
+          atHome: value['atHome'] ?? false,
+        );
+      }).toList();
+
+      state = items;
+      debugPrint('🔄 Refreshed ${items.length} items from RTDB.');
+    } catch (e) {
+      debugPrint('❌ RTDB refresh failed: $e');
+    }
   }
 
   @override
@@ -636,102 +776,77 @@ final userItemsProvider =
   return UserItemsNotifier(user?.uid ?? '');
 });
 
-/// Provider for the LIVE status of all devices (from RTDB)
-/// ESP32 writes here: /devices/AA:BB:CC:DD:EE:FF/connected = true
-final devicesStatusProvider = StreamProvider<Map<String, bool>>((ref) {
-  if (!kUseFirebase) {
-    // Mock data for testing
-    return Stream.periodic(const Duration(seconds: 2), (i) {
-      return {
-        'AA:BB:CC:DD:EE:FF': i % 2 == 0,
-        '00:11:22:33:44:55': i % 3 == 0,
-      };
-    });
-  }
-  final refDb = _db.ref('/devices');
-  return refDb.onValue.handleError((e) {
-    debugPrint('Firebase stream error: $e');
-  }).map((event) {
-    final data = event.snapshot.value;
-    // 🧱 Safety: handle null or non-map data
-    if (data == null || data is! Map) return <String, bool>{};
-    final statusMap = <String, bool>{};
-    for (final entry in data.entries) {
-      final mac = entry.key.toString().toUpperCase();
-      final deviceData = entry.value;
-      if (deviceData is Map) {
-        statusMap[mac] = deviceData['connected'] == true;
-      } else if (deviceData is bool) {
-        statusMap[mac] = deviceData;
-      } else {
-        statusMap[mac] = false;
-      }
-    }
-    return statusMap;
-  });
-});
-
-/// Combined provider that merges the user's list with the live status
-final trackableItemsProvider = Provider<List<TrackableItem>>((ref) {
-  final userItems = ref.watch(userItemsProvider);
-  final liveStatuses = ref.watch(devicesStatusProvider).asData?.value ?? {};
-  return userItems.map((item) {
-    final bool atHome = liveStatuses[item.macAddress.toUpperCase()] ?? false;
-    return TrackableItem(id: item.macAddress, name: item.name, atHome: atHome);
-  }).toList();
-});
-
 /// ─────────────────────────────────────────────────────────────────────────────
-/// TASKS (TO-DO) PROVIDER
+/// TASKS (TO-DO) PROVIDER (FIXED FOR RTDB)
 /// ─────────────────────────────────────────────────────────────────────────────
 class TasksController extends StateNotifier<List<Task>> {
   final String userId;
-  late final CollectionReference _tasksRef;
-  StreamSubscription? _sub;
+  late final CollectionReference<Map<String, dynamic>> _tasksRef;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
+
   TasksController(this.userId) : super(const []) {
     if (userId.isEmpty) return;
     _tasksRef = _fs.collection('users').doc(userId).collection('tasks');
     _listen();
   }
+
   void _listen() {
     _sub?.cancel();
-    // Order by 'done' state (false first) then by creation time
     _sub = _tasksRef
         .orderBy('done')
         .orderBy('createdAt', descending: true)
         .snapshots()
-        .listen((snapshot) {
-      state = snapshot.docs.map((doc) {
-        final data = doc.data() as Map<String, dynamic>;
-        return Task(
-          id: doc.id,
-          title: data['title'],
-          due: (data['due'] as Timestamp?)?.toDate(),
-          done: data['done'] ?? false,
-        );
-      }).toList();
-    });
+        .listen(
+      (snapshot) {
+        try {
+          final tasks =
+              snapshot.docs.map((doc) => Task.fromFirestore(doc)).toList();
+          state = tasks;
+        } catch (e, st) {
+          debugPrint('❌ Firestore Task parsing error: $e\n$st');
+          state = [];
+        }
+      },
+      onError: (error) {
+        debugPrint('❌ Firestore Task stream error: $error');
+        state = [];
+      },
+    );
   }
 
-  void add(String title, {DateTime? due}) {
+  Future<void> add(String title, {DateTime? due}) async {
     if (title.trim().isEmpty || userId.isEmpty) return;
-    _tasksRef.add({
-      'title': title,
-      'due': due,
-      'done': false,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
+    try {
+      await _tasksRef.add({
+        'title': title.trim(),
+        'due': due != null ? Timestamp.fromDate(due) : null, // ✅ FIXED
+        'done': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      debugPrint('✅ Task added: $title');
+    } catch (e, st) {
+      debugPrint('❌ Failed to add task: $e\n$st');
+    }
   }
 
-  void toggle(String id) {
-    if (userId.isEmpty) return;
-    final task = state.firstWhere((t) => t.id == id);
-    _tasksRef.doc(id).update({'done': !task.done});
+  Future<void> toggle(String id) async {
+    if (userId.isEmpty || id.isEmpty) return;
+    try {
+      final task = state.firstWhere((t) => t.id == id);
+      await _tasksRef.doc(id).update({'done': !task.done});
+    } catch (e, st) {
+      debugPrint('❌ Failed to toggle task: $e\n$st');
+    }
   }
 
-  void remove(String id) {
-    if (userId.isEmpty) return;
-    _tasksRef.doc(id).delete();
+  Future<void> remove(String id) async {
+    if (userId.isEmpty || id.isEmpty) return;
+    try {
+      await _tasksRef.doc(id).delete();
+      debugPrint('🗑️ Task removed: $id');
+    } catch (e, st) {
+      debugPrint('❌ Failed to remove task: $e\n$st');
+    }
   }
 
   @override
@@ -1287,6 +1402,7 @@ class _AppShellState extends State<_AppShell> {
 class _HomePage extends ConsumerWidget {
   const _HomePage();
 
+  // 🔹 Helper to choose icons for items
   IconData _getIconForItem(String itemName) {
     final name = itemName.toLowerCase();
     if (name.contains('macbook') || name.contains('laptop')) {
@@ -1300,24 +1416,7 @@ class _HomePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final studyLog = ref.watch(studyLogProvider);
-    final sensorData = ref.watch(sensorStreamProvider);
-    final items = ref.watch(trackableItemsProvider);
     final user = ref.watch(authProvider);
-
-    final todayStudy = studyLog[_dayKey(DateTime.now())] ?? Duration.zero;
-    final studyHours = todayStudy.inHours;
-    final studyMinutes = todayStudy.inMinutes.remainder(60);
-
-    final temp =
-        sensorData.asData?.value?.temperature?.toStringAsFixed(0) ?? '--';
-    final humidity =
-        sensorData.asData?.value?.humidity?.toStringAsFixed(0) ?? '--';
-    final light =
-        sensorData.asData?.value?.lightLux?.toStringAsFixed(0) ?? '--';
-
-    final itemsAtHome = items.where((i) => i.atHome).length;
-    final itemsInHome = items.where((i) => i.atHome).toList();
 
     return Scaffold(
       backgroundColor: kBackgroundLight,
@@ -1355,7 +1454,7 @@ class _HomePage extends ConsumerWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // Greeting
+          // 🔹 Greeting
           Text(
             'Hello, ${user?.displayName ?? 'User'}!',
             style: const TextStyle(
@@ -1366,154 +1465,202 @@ class _HomePage extends ConsumerWidget {
           ),
           const SizedBox(height: 24),
 
-          // Environmental Stats Row
-          SizedBox(
-            height: 120,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                _EnvTile(
-                  icon: Icons.thermostat,
-                  title: 'Room Temp',
-                  value: '$temp°C',
-                  color: const Color(0xFFFF9500),
-                ),
-                const SizedBox(width: 12),
-                _EnvTile(
-                  icon: Icons.water_drop,
-                  title: 'Humidity',
-                  value: '$humidity%',
-                  color: const Color(0xFF32ADE6),
-                ),
-                const SizedBox(width: 12),
-                _EnvTile(
-                  icon: Icons.lightbulb,
-                  title: 'Light Level',
-                  value: '$light lx',
-                  color: const Color(0xFFFFCC00),
-                ),
-              ],
-            ),
-          ),
+          // 🔹 Environmental Stats
+          const _EnvironmentSection(),
           const SizedBox(height: 24),
 
-          // Dashboard tiles
-          Row(
-            children: [
-              Expanded(
-                child: _DashboardTile(
-                  icon: Icons.school,
-                  title: "Today's Study",
-                  value: '${studyHours}h ${studyMinutes}m',
-                  color: const Color(0xFF007AFF),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: _DashboardTile(
-                  icon: Icons.link,
-                  title: 'Items at Home',
-                  value: '$itemsAtHome items',
-                  color: const Color(0xFF34C759),
-                ),
-              ),
-            ],
-          ),
+          // 🔹 Dashboard (Study + Items)
+          const _DashboardSection(),
           const SizedBox(height: 24),
 
-          // Items in Home Section
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.03),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+          // 🔹 Items in Home
+          _ItemsSection(getIconForItem: _getIconForItem),
+        ],
+      ),
+    );
+  }
+}
+
+class _EnvironmentSection extends ConsumerWidget {
+  const _EnvironmentSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sensorData = ref.watch(sensorStreamProvider);
+
+    final temp =
+        sensorData.asData?.value?.temperature?.toStringAsFixed(0) ?? '--';
+    final humidity =
+        sensorData.asData?.value?.humidity?.toStringAsFixed(0) ?? '--';
+    final light =
+        sensorData.asData?.value?.lightLux?.toStringAsFixed(0) ?? '--';
+
+    return SizedBox(
+      height: 120,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: [
+          _EnvTile(
+            icon: Icons.thermostat,
+            title: 'Room Temp',
+            value: '$temp°C',
+            color: const Color(0xFFFF9500),
+          ),
+          const SizedBox(width: 12),
+          _EnvTile(
+            icon: Icons.water_drop,
+            title: 'Humidity',
+            value: '$humidity%',
+            color: const Color(0xFF32ADE6),
+          ),
+          const SizedBox(width: 12),
+          _EnvTile(
+            icon: Icons.lightbulb,
+            title: 'Light Level',
+            value: '$light lx',
+            color: const Color(0xFFFFCC00),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashboardSection extends ConsumerWidget {
+  const _DashboardSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final studyLog = ref.watch(studyLogProvider);
+    final items = ref.watch(userItemsProvider);
+
+    final todayStudy = studyLog[_dayKey(DateTime.now())] ?? Duration.zero;
+    final hours = todayStudy.inHours;
+    final minutes = todayStudy.inMinutes.remainder(60);
+    final itemsAtHome = items.where((i) => i.atHome).length;
+
+    return Row(
+      children: [
+        Expanded(
+          child: _DashboardTile(
+            icon: Icons.school,
+            title: "Today's Study",
+            value: '${hours}h ${minutes}m',
+            color: const Color(0xFF007AFF),
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: _DashboardTile(
+            icon: Icons.link,
+            title: 'Items at Home',
+            value: '$itemsAtHome items',
+            color: const Color(0xFF34C759),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ItemsSection extends ConsumerWidget {
+  final IconData Function(String) getIconForItem;
+  const _ItemsSection({required this.getIconForItem});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final items = ref.watch(userItemsProvider);
+    final itemsInHome = items.where((i) => i.atHome).toList();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Items In Home',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              color: Colors.black,
             ),
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Items In Home',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.black,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                if (itemsInHome.isEmpty)
-                  const Center(
-                    child: Text(
-                      'No items at home',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  )
-                else
-                  SizedBox(
-                    height: 120,
-                    child: ListView.builder(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: itemsInHome.length,
-                      itemBuilder: (context, index) {
-                        final item = itemsInHome[index];
-                        return Padding(
-                          padding: const EdgeInsets.only(right: 16),
-                          child: Column(
-                            children: [
-                              Container(
-                                width: 72,
-                                height: 72,
-                                decoration: BoxDecoration(
-                                  color: Colors.grey.shade100,
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                                child: Icon(
-                                  _getIconForItem(item.name),
-                                  size: 36,
-                                  color: Colors.grey.shade600,
-                                ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                item.name,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 6),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: const [
-                                  Icon(Icons.circle,
-                                      color: Color(0xFF34C759), size: 10),
-                                  SizedBox(width: 4),
-                                  Text(
-                                    'In Home',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
+          ),
+          const SizedBox(height: 12),
+          if (itemsInHome.isEmpty)
+            const Center(
+              child: Text(
+                'No items at home',
+                style: TextStyle(color: Colors.grey),
+              ),
+            )
+          else
+            SizedBox(
+              height: 120,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: itemsInHome.length,
+                itemBuilder: (context, index) {
+                  final item = itemsInHome[index];
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(16),
                           ),
-                        );
-                      },
+                          child: Icon(
+                            getIconForItem(item.name),
+                            size: 36,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          item.name,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 6),
+                        const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.circle,
+                                color: Color(0xFF34C759), size: 10),
+                            SizedBox(width: 4),
+                            Text(
+                              'In Home',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                  ),
-              ],
+                  );
+                },
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -1643,9 +1790,151 @@ class _DashboardTile extends StatelessWidget {
 /// ─────────────────────────────────────────────────────────────────────────────
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
+
+  // --- ⚠️ FIX: HELPER METHODS MOVED OUTSIDE 'build' METHOD ---
+
+  // --- HELPER METHOD for Password Reset ---
+  void _resetPassword(WidgetRef ref) async {
+    final user = ref.read(authProvider);
+    final BuildContext? context = navigatorKey.currentContext;
+
+    if (user == null || user.email.isEmpty) {
+      if (context != null && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error: Could not find user email.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: user.email);
+      if (context != null && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Password reset email sent to ${user.email}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } on FirebaseAuthException catch (e) {
+      if (context != null && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.message ?? "Failed to send email"}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // --- NEW HELPER METHOD for Changing User Name ---
+  Future<void> _showChangeNameDialog(
+      BuildContext dialogContext, WidgetRef ref) async {
+    final TextEditingController nameController = TextEditingController();
+    final user = ref.read(authProvider);
+    nameController.text = user?.displayName ?? ''; // Pre-fill with current name
+
+    return showDialog<void>(
+      context: dialogContext,
+      barrierDismissible: false, // User must tap button to close
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Change User Name'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                TextFormField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'New User Name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: const Text('Save'),
+              onPressed: () async {
+                final newName = nameController.text.trim();
+                if (newName.isEmpty) {
+                  // You can add a snackbar here for "name cannot be empty"
+                  return;
+                }
+
+                final BuildContext? snackbarContext =
+                    navigatorKey.currentContext;
+
+                try {
+                  // 1. Get the *actual* Firebase User
+                  final firebaseUser = FirebaseAuth.instance.currentUser;
+                  if (firebaseUser == null) {
+                    throw Exception('User not logged in.');
+                  }
+
+                  // 2. Call the method on the Firebase User
+                  await firebaseUser.updateDisplayName(newName);
+
+                  // 3. Force a reload and invalidate the provider
+                  await firebaseUser.reload();
+                  ref.invalidate(authProvider);
+
+                  if (snackbarContext != null && snackbarContext.mounted) {
+                    ScaffoldMessenger.of(snackbarContext).showSnackBar(
+                      const SnackBar(
+                        content: Text('User name updated successfully!'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                  if (context.mounted) {
+                    Navigator.of(context).pop(); // Close the dialog
+                  }
+                } on FirebaseAuthException catch (e) {
+                  if (snackbarContext != null && snackbarContext.mounted) {
+                    ScaffoldMessenger.of(snackbarContext).showSnackBar(
+                      SnackBar(
+                        content: Text('Error updating name: ${e.message}'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (snackbarContext != null && snackbarContext.mounted) {
+                    ScaffoldMessenger.of(snackbarContext).showSnackBar(
+                      SnackBar(
+                        content: Text('An unexpected error occurred: $e'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+  // --- END HELPER METHODS ---
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Watch the authProvider so the UI rebuilds when display name changes
     final user = ref.watch(authProvider);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Profile & Settings')),
       body: ListView(
@@ -1656,22 +1945,29 @@ class ProfileScreen extends ConsumerWidget {
               children: [
                 CircleAvatar(
                   radius: 50,
-                  backgroundColor: Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer,
-                  child: Text(
-                    user?.displayName.substring(0, 1).toUpperCase() ?? '?',
-                    style: TextStyle(
-                      fontSize: 40,
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
+                  backgroundColor:
+                      Colors.orange.shade100, // A light, warm orange
+                  child: Icon(
+                    Icons.person,
+                    size: 48,
+                    color: Colors.orange.shade700, // A darker orange
                   ),
                 ),
                 const SizedBox(height: 16),
                 Text(
+                  user?.displayName ?? 'User',
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 4),
+                Text(
                   user?.email ?? 'No email',
-                  style: Theme.of(context).textTheme.titleLarge,
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(color: Colors.grey.shade600),
                 ),
               ],
             ),
@@ -1681,18 +1977,25 @@ class ProfileScreen extends ConsumerWidget {
             child: Column(
               children: [
                 ListTile(
-                  leading: const Icon(Icons.notifications_outlined),
-                  title: const Text('Notification Settings'),
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text('Change User Name'),
+                  subtitle: Text(user?.displayName ?? 'Not set'),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () {},
+                  onTap: () => _showChangeNameDialog(context, ref),
                 ),
+                const Divider(height: 1), // Separator
                 ListTile(
-                  leading: const Icon(Icons.link_outlined),
-                  title: const Text('Manage Items'),
+                  leading: const Icon(Icons.email_outlined),
+                  title: const Text('Email Address'),
+                  subtitle: Text(user?.email ?? 'Not set'),
+                ),
+                const Divider(height: 1), // Separator
+                ListTile(
+                  leading: const Icon(Icons.lock_reset_outlined),
+                  title: const Text('Reset Password'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
-                    // This could navigate to the Items tab
-                    // Or be a separate management screen
+                    _resetPassword(ref);
                   },
                 ),
               ],
@@ -1708,9 +2011,9 @@ class ProfileScreen extends ConsumerWidget {
               ),
               onTap: () async {
                 await ref.read(authProvider.notifier).signOut();
-                if (context.mounted) {
-                  // Pop back to the root (LoginScreen)
-                  Navigator.of(context).popUntil((route) => route.isFirst);
+                final navContext = navigatorKey.currentContext;
+                if (navContext != null && navContext.mounted) {
+                  Navigator.of(navContext).popUntil((route) => route.isFirst);
                 }
               },
             ),
@@ -1972,7 +2275,7 @@ class _ItemsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final items = ref.watch(trackableItemsProvider);
+    final items = ref.watch(userItemsProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('My Items')),
       body: items.isEmpty
@@ -2016,28 +2319,29 @@ class _ItemsPage extends ConsumerWidget {
 
 /// Helper for the Items Page
 class _ItemTile extends ConsumerWidget {
-  final TrackableItem item;
-  const _ItemTile({required this.item});
+  final UserItem item;
+  const _ItemTile({required this.item, super.key});
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final bool atHome = item.atHome;
-    // From design: status-green-text, status-gray-text
     final Color statusColor =
         atHome ? const Color(0xFF34C759) : const Color(0xFF8E8E93);
-    // From design: status-green-bg, status-gray-bg
     final Color statusBgColor =
         atHome ? const Color(0x1A34C759) : const Color(0x1A8E8E93);
     final IconData statusIcon =
         atHome ? Icons.check_circle : Icons.remove_circle_outline;
+
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6.0),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16), // xl
+        borderRadius: BorderRadius.circular(16),
         side: BorderSide(color: Colors.grey.shade200, width: 1),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Container(
               width: 48,
@@ -2058,18 +2362,63 @@ class _ItemTile extends ConsumerWidget {
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
+                      color: Colors.black,
                     ),
                   ),
                   Text(
-                    item.id, // The MAC address
-                    style: const TextStyle(color: Colors.grey, fontSize: 14),
+                    item.macAddress,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 14,
+                    ),
                   ),
                 ],
               ),
             ),
-            Text(
-              atHome ? 'At Home' : 'Away',
-              style: TextStyle(color: statusColor, fontWeight: FontWeight.w500),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  atHome ? 'At Home' : 'Away',
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  tooltip: 'Remove Item',
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Remove Item?'),
+                        content: Text('Do you want to remove "${item.name}"?'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Cancel'),
+                          ),
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text(
+                              'Remove',
+                              style: TextStyle(color: Colors.red),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirm == true) {
+                      await ref
+                          .read(userItemsProvider.notifier)
+                          .remove(item.macAddress);
+                    }
+                  },
+                ),
+              ],
             ),
           ],
         ),
@@ -2079,7 +2428,7 @@ class _ItemTile extends ConsumerWidget {
 }
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// TAB 4: TASKS (TO-DO) SCREEN
+/// TAB 4: TASKS (TO-DO) SCREEN (FINAL FIXED VERSION)
 /// ─────────────────────────────────────────────────────────────────────────────
 class _TasksPage extends ConsumerStatefulWidget {
   const _TasksPage({super.key});
@@ -2089,82 +2438,64 @@ class _TasksPage extends ConsumerStatefulWidget {
 
 class _TasksPageState extends ConsumerState<_TasksPage> {
   final _taskController = TextEditingController();
+
   @override
   void dispose() {
     _taskController.dispose();
     super.dispose();
   }
 
+  // ✅ FIX 1: This method is correctly defined inside the State class
   void _addTask() {
     final title = _taskController.text.trim();
     if (title.isEmpty) return;
+
+    // The core action: read the notifier and add the task
     ref.read(tasksProvider.notifier).add(title);
+
     _taskController.clear();
-    FocusScope.of(context).unfocus(); // Hide keyboard
+    if (mounted) {
+      FocusScope.of(context).unfocus(); // Hide keyboard
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final tasks = ref.watch(tasksProvider);
-    // Separate tasks for better UI
-    final pendingTasks = tasks.where((t) => !t.done).toList();
-    final completedTasks = tasks.where((t) => t.done).toList();
-    return Scaffold(
-      appBar: AppBar(title: const Text('My Tasks')),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              children: [
-                // Pending Tasks Section
-                Text(
-                  'To-Do',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                if (pendingTasks.isEmpty)
-                  const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(32.0),
-                      child: Text(
-                        'All caught up! 🎉',
-                        style: TextStyle(color: Colors.grey, fontSize: 16),
-                      ),
-                    ),
-                  ),
-                ...pendingTasks.map((task) => _TaskTile(task: task)),
-                // Completed Tasks Section
-                if (completedTasks.isNotEmpty) ...[
-                  const SizedBox(height: 24),
-                  Text(
-                    'Completed',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  ...completedTasks.map((task) => _TaskTile(task: task)),
-                ],
-              ],
+  // ✅ FIX 2: Helper to build a list section
+  List<Widget> _buildTaskList(
+      BuildContext context, List<Task> tasks, String title) {
+    return [
+      Text(
+        title,
+        style: Theme.of(context)
+            .textTheme
+            .titleLarge
+            ?.copyWith(fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 8),
+      if (tasks.isEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16.0),
+          child: Center(
+            child: Text(
+              // Show a clear message based on section
+              title == 'To-Do'
+                  ? 'Add a task to get started!'
+                  : 'No completed tasks yet',
+              style: const TextStyle(color: Colors.grey, fontSize: 16),
             ),
           ),
-          // 4. "Add Task" text field at the bottom
-          _buildAddTaskBar(),
-        ],
-      ),
-    );
+        ),
+      // Use a standard 'for' loop for mapping in a list
+      for (final task in tasks) _TaskTile(task: task),
+    ];
   }
 
-  // Helper for the bottom text bar
+  // ✅ FIX 3: Helper for the bottom text bar
   Widget _buildAddTaskBar() {
     return Container(
       padding: EdgeInsets.fromLTRB(
         16,
         8,
-        8,
+        16,
         MediaQuery.of(context).viewInsets.bottom + 16,
       ),
       decoration: BoxDecoration(
@@ -2176,20 +2507,37 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
           Expanded(
             child: TextField(
               controller: _taskController,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Add a new task...',
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12.0),
+                  borderSide: const BorderSide(color: kBorderLight),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12.0),
+                  borderSide: const BorderSide(color: kBorderLight),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12.0),
+                  borderSide: const BorderSide(color: kPrimaryBlue, width: 2),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               ),
               onSubmitted: (_) => _addTask(),
             ),
           ),
+          const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.add),
+            iconSize: 28,
             style: IconButton.styleFrom(
               backgroundColor: kPrimaryBlue,
               foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              padding: const EdgeInsets.all(14),
             ),
             onPressed: _addTask,
           ),
@@ -2197,37 +2545,100 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
       ),
     );
   }
+
+  @override
+  Widget build(BuildContext context) {
+    // Watch the list of tasks from Firestore
+    final tasks = ref.watch(tasksProvider);
+
+    // Separate tasks for better UI
+    final pendingTasks = tasks.where((t) => !t.done).toList();
+    final completedTasks = tasks.where((t) => t.done).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('My Tasks'),
+        titleTextStyle: const TextStyle(
+          fontFamily: 'Lexend',
+          color: Colors.black,
+          fontSize: 24,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                // Use the helper to build the "To-Do" list
+                ..._buildTaskList(
+                  context,
+                  pendingTasks,
+                  'To-Do',
+                ),
+                const SizedBox(height: 24),
+                // Use the helper to build the "Completed" list
+                // Only show Completed section if there are completed tasks
+                if (completedTasks.isNotEmpty)
+                  ..._buildTaskList(
+                    context,
+                    completedTasks,
+                    'Completed',
+                  ),
+              ],
+            ),
+          ),
+          // 4. "Add Task" field is now correctly positioned
+          _buildAddTaskBar(),
+        ],
+      ),
+    );
+  }
 }
 
-/// Helper for the Tasks Page
+/// Helper for the Tasks Page (matches new design)
 class _TaskTile extends ConsumerWidget {
   final Task task;
   const _TaskTile({required this.task});
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16), // xl
-        side: BorderSide(color: Colors.grey.shade200, width: 1),
+        borderRadius: BorderRadius.circular(12), // xl
       ),
-      child: CheckboxListTile(
-        value: task.done,
-        onChanged: (val) {
-          ref.read(tasksProvider.notifier).toggle(task.id);
-        },
-        title: Text(
-          task.title,
-          style: TextStyle(
-            decoration:
-                task.done ? TextDecoration.lineThrough : TextDecoration.none,
-            color: task.done ? Colors.grey : kTextPrimaryLight,
-          ),
-        ),
-        controlAffinity: ListTileControlAffinity.leading,
-        activeColor: kPrimaryBlue,
-        checkboxShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(6),
+      elevation: 0.5,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+        child: Row(
+          children: [
+            Checkbox(
+              value: task.done,
+              onChanged: (val) {
+                ref.read(tasksProvider.notifier).toggle(task.id);
+              },
+              activeColor: kPrimaryBlue,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(6),
+              ),
+              visualDensity: VisualDensity.compact,
+            ),
+            Expanded(
+              child: Text(
+                task.title,
+                style: TextStyle(
+                  decoration: task.done
+                      ? TextDecoration.lineThrough
+                      : TextDecoration.none,
+                  color: task.done ? Colors.grey.shade600 : kTextPrimaryLight,
+                  fontWeight: task.done ? FontWeight.normal : FontWeight.w500,
+                  fontSize: 16,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
