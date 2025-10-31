@@ -1282,48 +1282,57 @@ class _AppShellState extends State<_AppShell> {
 }
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// TAB 1: HOME (DASHBOARD) SCREEN
+/// TAB 1: HOME (DASHBOARD) SCREEN (FIXED DESIGN)
 /// ─────────────────────────────────────────────────────────────────────────────
 class _HomePage extends ConsumerWidget {
   const _HomePage();
+
+  IconData _getIconForItem(String itemName) {
+    final name = itemName.toLowerCase();
+    if (name.contains('macbook') || name.contains('laptop')) {
+      return Icons.laptop_chromebook;
+    }
+    if (name.contains('book')) return Icons.menu_book;
+    if (name.contains('headphones')) return Icons.headphones;
+    if (name.contains('key')) return Icons.key;
+    return Icons.devices_other;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 1. Watch all the data providers we need
     final studyLog = ref.watch(studyLogProvider);
     final sensorData = ref.watch(sensorStreamProvider);
     final items = ref.watch(trackableItemsProvider);
     final user = ref.watch(authProvider);
-    // 2. Get specific values, with fallbacks
+
     final todayStudy = studyLog[_dayKey(DateTime.now())] ?? Duration.zero;
     final studyHours = todayStudy.inHours;
     final studyMinutes = todayStudy.inMinutes.remainder(60);
+
     final temp =
-        sensorData.asData?.value?.temperature?.toStringAsFixed(1) ?? '--';
+        sensorData.asData?.value?.temperature?.toStringAsFixed(0) ?? '--';
     final humidity =
         sensorData.asData?.value?.humidity?.toStringAsFixed(0) ?? '--';
     final light =
         sensorData.asData?.value?.lightLux?.toStringAsFixed(0) ?? '--';
+
     final itemsAtHome = items.where((i) => i.atHome).length;
     final itemsInHome = items.where((i) => i.atHome).toList();
-    // 3. Listen for "left-home" alerts
-    ref.listen(leftHomeAnyProvider, (prev, next) async {
-      if (next.value == true) {
-        final leftItems =
-            items.where((i) => !i.atHome).map((e) => e.name).toList();
-        final msg = leftItems.isEmpty
-            ? 'You left home, but all items are with you!'
-            : 'Did you forget? Items left at home: ${leftItems.join(', ')}';
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(msg)));
-        if (kUseFcm && !kIsWeb) {
-          await Notifier.show(title: 'Intellidesk Alert', body: msg);
-        }
-      }
-    });
+
     return Scaffold(
+      backgroundColor: kBackgroundLight,
       appBar: AppBar(
-        title: const Text('Intellidesk'),
+        backgroundColor: Colors.white,
+        elevation: 0,
+        title: const Text(
+          'Intellidesk',
+          style: TextStyle(
+            color: Colors.black,
+            fontWeight: FontWeight.w900,
+            fontSize: 22,
+            letterSpacing: -0.5,
+          ),
+        ),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 16.0),
@@ -1336,27 +1345,30 @@ class _HomePage extends ConsumerWidget {
               },
               child: CircleAvatar(
                 radius: 20,
-                backgroundColor: Colors.grey.shade200,
-                // Using an icon as placeholder like in the design
-                child: const Icon(Icons.person, color: Colors.grey),
+                backgroundColor: const Color(0xFFFFE5CC),
+                child: const Icon(Icons.person, color: Colors.black),
               ),
             ),
           ),
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         children: [
+          // Greeting
           Text(
             'Hello, ${user?.displayName ?? 'User'}!',
-            style: Theme.of(
-              context,
-            ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+            style: const TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w900,
+              color: Colors.black,
+            ),
           ),
           const SizedBox(height: 24),
-          // Horizontal scroll for environmental stats
+
+          // Environmental Stats Row
           SizedBox(
-            height: 120, // Adjust based on card height
+            height: 120,
             child: ListView(
               scrollDirection: Axis.horizontal,
               children: [
@@ -1384,7 +1396,8 @@ class _HomePage extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 24),
-          // Grid for study and items
+
+          // Dashboard tiles
           Row(
             children: [
               Expanded(
@@ -1407,90 +1420,98 @@ class _HomePage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 24),
-          // Items in home section
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Items In Home',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
+
+          // Items in Home Section
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.03),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Items In Home',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (itemsInHome.isEmpty)
+                  const Center(
+                    child: Text(
+                      'No items at home',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  )
+                else
+                  SizedBox(
+                    height: 120,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: itemsInHome.length,
+                      itemBuilder: (context, index) {
+                        final item = itemsInHome[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 16),
+                          child: Column(
+                            children: [
+                              Container(
+                                width: 72,
+                                height: 72,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade100,
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: Icon(
+                                  _getIconForItem(item.name),
+                                  size: 36,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                item.name,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                textAlign: TextAlign.center,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: const [
+                                  Icon(Icons.circle,
+                                      color: Color(0xFF34C759), size: 10),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'In Home',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  if (itemsInHome.isEmpty)
-                    const Center(
-                      child: Text(
-                        'No items at home',
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      height: 120, // Adjust based on item height
-                      child: ListView.builder(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: itemsInHome.length,
-                        itemBuilder: (context, index) {
-                          final item = itemsInHome[index];
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 12.0),
-                            child: Column(
-                              children: [
-                                Container(
-                                  width: 64,
-                                  height: 64,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade100,
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    Icons
-                                        .devices_other, // Placeholder icon; customize per item if needed
-                                    size: 32,
-                                    color: Colors.grey.shade500,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  item.name,
-                                  style: const TextStyle(fontSize: 12),
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(height: 4),
-                                Row(
-                                  children: [
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: const BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: Color(0xFF34C759), // Green dot
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    const Text(
-                                      'In Home',
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: Colors.grey,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                ],
-              ),
+              ],
             ),
           ),
         ],
@@ -1499,7 +1520,9 @@ class _HomePage extends ConsumerWidget {
   }
 }
 
-/// Helper for environmental tiles (small horizontal cards)
+/// ─────────────────────────────────────────────────────────────────────────────
+/// ENVIRONMENTAL TILE (Small Horizontal Card)
+/// ─────────────────────────────────────────────────────────────────────────────
 class _EnvTile extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -1511,32 +1534,47 @@ class _EnvTile extends StatelessWidget {
     required this.value,
     required this.color,
   });
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 128, // Fixed width for scrollable
-      padding: const EdgeInsets.all(12),
+      width: 128,
+      margin: const EdgeInsets.only(right: 12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
         color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 24, color: color),
+          Icon(icon, color: color, size: 26),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 title,
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: Colors.grey,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
               Text(
                 value,
-                style:
-                    const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.black,
+                ),
               ),
             ],
           ),
@@ -1546,7 +1584,9 @@ class _EnvTile extends StatelessWidget {
   }
 }
 
-/// Helper for the dashboard tiles (larger grid cards)
+/// ─────────────────────────────────────────────────────────────────────────────
+/// DASHBOARD TILE (Large Square Card)
+/// ─────────────────────────────────────────────────────────────────────────────
 class _DashboardTile extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -1558,33 +1598,39 @@ class _DashboardTile extends StatelessWidget {
     required this.value,
     required this.color,
   });
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
         color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 32, color: color),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(fontSize: 14, color: Colors.grey),
-              ),
-              Text(
-                value,
-                style:
-                    const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-            ],
+          Icon(icon, size: 28, color: color),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w900,
+              color: Colors.black,
+            ),
           ),
         ],
       ),
