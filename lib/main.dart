@@ -551,7 +551,6 @@ FirebaseDatabase get _db => FirebaseDatabase.instanceFor(
       app: Firebase.app(),
       databaseURL: kDatabaseUrl,
     );
-FirebaseFirestore get _fs => FirebaseFirestore.instance;
 
 /// ─────────────────────────────────────────────────────────────────────────────
 /// AUTH PROVIDER
@@ -786,32 +785,46 @@ class TasksController extends StateNotifier<List<Task>> {
 
   TasksController(this.userId) : super(const []) {
     if (userId.isEmpty) return;
-    _tasksRef = _fs.collection('users').doc(userId).collection('tasks');
+    _tasksRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .collection('tasks');
     _listen();
   }
 
   void _listen() {
     _sub?.cancel();
-    _sub = _tasksRef
-        .orderBy('done')
-        .orderBy('createdAt', descending: true)
-        .snapshots()
-        .listen(
-      (snapshot) {
-        try {
-          final tasks =
-              snapshot.docs.map((doc) => Task.fromFirestore(doc)).toList();
-          state = tasks;
-        } catch (e, st) {
-          debugPrint('❌ Firestore Task parsing error: $e\n$st');
-          state = [];
-        }
-      },
-      onError: (error) {
-        debugPrint('❌ Firestore Task stream error: $error');
+    _sub = _tasksRef.orderBy('createdAt', descending: true).snapshots().listen(
+        (snapshot) {
+      if (snapshot.docs.isEmpty) {
+        debugPrint('⚠️ No Firestore tasks found for user $userId.');
         state = [];
-      },
-    );
+        return;
+      }
+
+      final tasks = snapshot.docs.map((doc) {
+        try {
+          final data = doc.data();
+          return Task(
+            id: doc.id,
+            title: data['title'] ?? 'Untitled Task',
+            done: data['done'] == true,
+            due: (data['due'] as Timestamp?)?.toDate(),
+            createdAt:
+                (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+          );
+        } catch (e) {
+          debugPrint('❌ Error parsing task: $e');
+          return Task(id: doc.id, title: 'Error Task');
+        }
+      }).toList();
+
+      debugPrint('✅ Synced ${tasks.length} tasks from Firestore');
+      state = tasks;
+    }, onError: (error) {
+      debugPrint('❌ Firestore stream error: $error');
+      state = [];
+    });
   }
 
   Future<void> add(String title, {DateTime? due}) async {
@@ -819,13 +832,13 @@ class TasksController extends StateNotifier<List<Task>> {
     try {
       await _tasksRef.add({
         'title': title.trim(),
-        'due': due != null ? Timestamp.fromDate(due) : null, // ✅ FIXED
         'done': false,
+        'due': due != null ? Timestamp.fromDate(due) : null,
         'createdAt': FieldValue.serverTimestamp(),
       });
-      debugPrint('✅ Task added: $title');
-    } catch (e, st) {
-      debugPrint('❌ Failed to add task: $e\n$st');
+      debugPrint('✅ Task added to Firestore: $title');
+    } catch (e) {
+      debugPrint('❌ Failed to add Firestore task: $e');
     }
   }
 
@@ -834,8 +847,8 @@ class TasksController extends StateNotifier<List<Task>> {
     try {
       final task = state.firstWhere((t) => t.id == id);
       await _tasksRef.doc(id).update({'done': !task.done});
-    } catch (e, st) {
-      debugPrint('❌ Failed to toggle task: $e\n$st');
+    } catch (e) {
+      debugPrint('❌ Failed to toggle Firestore task: $e');
     }
   }
 
@@ -844,8 +857,8 @@ class TasksController extends StateNotifier<List<Task>> {
     try {
       await _tasksRef.doc(id).delete();
       debugPrint('🗑️ Task removed: $id');
-    } catch (e, st) {
-      debugPrint('❌ Failed to remove task: $e\n$st');
+    } catch (e) {
+      debugPrint('❌ Failed to remove Firestore task: $e');
     }
   }
 
@@ -859,48 +872,6 @@ class TasksController extends StateNotifier<List<Task>> {
 final tasksProvider = StateNotifierProvider<TasksController, List<Task>>((ref) {
   final user = ref.watch(authProvider);
   return TasksController(user?.uid ?? '');
-});
-
-/// ─────────────────────────────────────────────────────────────────────────────
-/// STUDY LOG PROVIDER
-/// ─────────────────────────────────────────────────────────────────────────────
-DateTime _dayKey(DateTime d) => DateTime(d.year, d.month, d.day);
-
-class StudyLogNotifier extends StateNotifier<Map<DateTime, Duration>> {
-  final String userId;
-  late final CollectionReference _logsRef;
-  StudyLogNotifier(this.userId) : super(<DateTime, Duration>{}) {
-    if (userId.isEmpty) return;
-    _logsRef = _fs.collection('users').doc(userId).collection('study_logs');
-    _load();
-  }
-  Future<void> _load() async {
-    final snapshot = await _logsRef.get();
-    state = {
-      for (final doc in snapshot.docs)
-        DateTime.parse(doc.id): Duration(seconds: doc['duration'] as int),
-    };
-  }
-
-  void addForToday(Duration d) {
-    if (userId.isEmpty) return;
-    final k = _dayKey(DateTime.now());
-    final cur = state[k] ?? Duration.zero;
-    final newTotal = cur + d;
-    state = {...state, k: newTotal};
-    _logsRef.doc(k.toIso8601String()).set({'duration': newTotal.inSeconds});
-  }
-
-  Duration get todayTotal {
-    final k = _dayKey(DateTime.now());
-    return state[k] ?? Duration.zero;
-  }
-}
-
-final studyLogProvider =
-    StateNotifierProvider<StudyLogNotifier, Map<DateTime, Duration>>((ref) {
-  final user = ref.watch(authProvider);
-  return StudyLogNotifier(user?.uid ?? '');
 });
 
 /// ─────────────────────────────────────────────────────────────────────────────
@@ -1529,6 +1500,10 @@ class _EnvironmentSection extends ConsumerWidget {
 class _DashboardSection extends ConsumerWidget {
   const _DashboardSection();
 
+  String _dayKey(DateTime date) {
+    return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final studyLog = ref.watch(studyLogProvider);
@@ -1665,6 +1640,61 @@ class _ItemsSection extends ConsumerWidget {
       ),
     );
   }
+}
+
+final studyLogProvider =
+    StateNotifierProvider<StudyLogController, Map<String, Duration>>((ref) {
+  final userId =
+      "demoUser"; // You can replace with ref.watch(authProvider)?.uid later
+  return StudyLogController(userId);
+});
+
+class StudyLogController extends StateNotifier<Map<String, Duration>> {
+  final String userId;
+  final _fs = FirebaseFirestore.instance;
+
+  StudyLogController(this.userId) : super({}) {
+    if (userId.isEmpty) return;
+    _listen();
+  }
+
+  /// Stream live updates from Firestore
+  void _listen() {
+    _fs
+        .collection('users')
+        .doc(userId)
+        .collection('studyLog')
+        .snapshots()
+        .listen((snapshot) {
+      final newMap = <String, Duration>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        newMap[doc.id] = Duration(minutes: data['minutes'] ?? 0);
+      }
+      state = newMap;
+    });
+  }
+
+  /// Add to today's total study time
+  Future<void> addForToday(Duration studied) async {
+    if (userId.isEmpty) return;
+    final todayKey = _dayKey(DateTime.now());
+    final ref = _fs
+        .collection('users')
+        .doc(userId)
+        .collection('studyLog')
+        .doc(todayKey);
+
+    await _fs.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final current = snap.exists ? (snap.data()?['minutes'] ?? 0) : 0;
+      tx.set(ref, {'minutes': current + studied.inMinutes},
+          SetOptions(merge: true));
+    });
+  }
+
+  String _dayKey(DateTime date) =>
+      '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 }
 
 /// ─────────────────────────────────────────────────────────────────────────────
@@ -2428,10 +2458,11 @@ class _ItemTile extends ConsumerWidget {
 }
 
 /// ─────────────────────────────────────────────────────────────────────────────
-/// TAB 4: TASKS (TO-DO) SCREEN (FINAL FIXED VERSION)
+/// TAB 4: TASKS (TO-DO) SCREEN (FULLY FIXED VERSION)
 /// ─────────────────────────────────────────────────────────────────────────────
 class _TasksPage extends ConsumerStatefulWidget {
   const _TasksPage({super.key});
+
   @override
   ConsumerState<_TasksPage> createState() => _TasksPageState();
 }
@@ -2440,28 +2471,53 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
   final _taskController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+
+    // ✅ Make sure tasks reload when user data becomes available
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.listenManual<AppUser?>(
+        authProvider,
+        (previous, next) {
+          if (next != null && next.uid.isNotEmpty) {
+            // ignore: avoid_print
+            print('✅ User UID loaded: ${next.uid}');
+            ref.invalidate(tasksProvider); // Force reload of tasks
+          }
+        },
+      );
+    });
+  }
+
+  @override
   void dispose() {
     _taskController.dispose();
     super.dispose();
   }
 
-  // ✅ FIX 1: This method is correctly defined inside the State class
+  // ✅ Add Task
   void _addTask() {
     final title = _taskController.text.trim();
     if (title.isEmpty) return;
 
-    // The core action: read the notifier and add the task
-    ref.read(tasksProvider.notifier).add(title);
-
-    _taskController.clear();
-    if (mounted) {
-      FocusScope.of(context).unfocus(); // Hide keyboard
+    final user = ref.read(authProvider);
+    if (user == null) {
+      debugPrint('⚠️ Cannot add task: user not logged in');
+      return;
     }
+
+    ref.read(tasksProvider.notifier).add(title);
+    _taskController.clear();
+
+    if (mounted) FocusScope.of(context).unfocus();
   }
 
-  // ✅ FIX 2: Helper to build a list section
+  // ✅ Task Section Builder
   List<Widget> _buildTaskList(
-      BuildContext context, List<Task> tasks, String title) {
+    BuildContext context,
+    List<Task> tasks,
+    String title,
+  ) {
     return [
       Text(
         title,
@@ -2476,20 +2532,18 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
           padding: const EdgeInsets.symmetric(vertical: 16.0),
           child: Center(
             child: Text(
-              // Show a clear message based on section
               title == 'To-Do'
                   ? 'Add a task to get started!'
-                  : 'No completed tasks yet',
+                  : 'No completed tasks yet 🎉',
               style: const TextStyle(color: Colors.grey, fontSize: 16),
             ),
           ),
         ),
-      // Use a standard 'for' loop for mapping in a list
       for (final task in tasks) _TaskTile(task: task),
     ];
   }
 
-  // ✅ FIX 3: Helper for the bottom text bar
+  // ✅ Add Task Input Bar
   Widget _buildAddTaskBar() {
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -2548,10 +2602,16 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Watch the list of tasks from Firestore
+    final user = ref.watch(authProvider);
+
+    if (user == null) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     final tasks = ref.watch(tasksProvider);
 
-    // Separate tasks for better UI
     final pendingTasks = tasks.where((t) => !t.done).toList();
     final completedTasks = tasks.where((t) => t.done).toList();
 
@@ -2571,25 +2631,13 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // Use the helper to build the "To-Do" list
-                ..._buildTaskList(
-                  context,
-                  pendingTasks,
-                  'To-Do',
-                ),
+                ..._buildTaskList(context, pendingTasks, 'To-Do'),
                 const SizedBox(height: 24),
-                // Use the helper to build the "Completed" list
-                // Only show Completed section if there are completed tasks
                 if (completedTasks.isNotEmpty)
-                  ..._buildTaskList(
-                    context,
-                    completedTasks,
-                    'Completed',
-                  ),
+                  ..._buildTaskList(context, completedTasks, 'Completed'),
               ],
             ),
           ),
-          // 4. "Add Task" field is now correctly positioned
           _buildAddTaskBar(),
         ],
       ),
@@ -2597,7 +2645,7 @@ class _TasksPageState extends ConsumerState<_TasksPage> {
   }
 }
 
-/// Helper for the Tasks Page (matches new design)
+/// Helper for each task tile
 class _TaskTile extends ConsumerWidget {
   final Task task;
   const _TaskTile({required this.task});
@@ -2607,7 +2655,7 @@ class _TaskTile extends ConsumerWidget {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12), // xl
+        borderRadius: BorderRadius.circular(12),
       ),
       elevation: 0.5,
       child: Padding(
